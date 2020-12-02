@@ -329,7 +329,7 @@ def download_bin(type_id, type_bin_name, type_bin_hash):
                     return False
 
 def spawn_subprocess_task(task_id, bin_name, input_type, paramaters, output_type):
-    """Will spawn a subpress based xecutuion thread
+    """Will spawn a a subprocess based task using the provided task details, then will update the task's status on the manager as required.
 
     Params:
         task_id: The ID of the task , as assigned by the manager
@@ -339,7 +339,7 @@ def spawn_subprocess_task(task_id, bin_name, input_type, paramaters, output_type
         output_type: The type of output
 
     Returns:
-        * A dictoary contained task info and the completed output
+        * True if successful
         * False if error
     """
     # Create initial subprocess args list
@@ -419,24 +419,55 @@ def configure_agent():
     with open("config/internal_settings.yaml", mode="w") as settings_file:
         yaml.dump(internal_settings, settings_file)
 
+def task_collector():
+    """Query for tasks on a scheudle, and add the the task queue. Will run on a endless loop.
+    """
+    while True:
+        # Query manager for tasks if the tasks queue is not full
+        if tasks_queue.full() == False:
+            logger.debug('Task queue is not full, collector is querying for tasks')
+            received_tasks = query_for_tasks()
+
+            if len(received_tasks) > 0:
+                logger.debug('Collector received a list of tasks', extra={'received_tasks':received_tasks})
+
+                for task in received_tasks:
+                    if tasks_queue.full() == False:
+                        tasks_queue.put(task)
+                        logger.debug('Collector added a task to the task queue', extra={'task':task})
+                        if update_task(task['task']['id'], "queued", None):
+                            logger.debug('Collector successfully updated task status to pending', extra={'task':task})
+                        else:
+                            logger.error('Collector thread could not update task status to pending', extra={'task':task})
+                    else:
+                        logger.debug('Task queue is now full, not adding any more tasks to the queue', extra={'task':task})
+
+            # If Task queue is not full add to queue
+        else:
+            logger.debug('Task queue is full, collector is not querying for tasks')
+
+        # Wait for the sepcificed delay in the config file
+        time.sleep(int(config['tasks']['interval']))
+
 def task_worker(tasks_queue):
     """Monitor tasks queue and execute tasks as appropriate
     """
     while True:
-        # Get task from queue
-        new_task = tasks_queue.get()
-        # launch as needed type
-
-        tasks_queue.task_done()
-
-def task_collector():
-    """Monitor tasks queue and execute tasks as appropriate
-    """
-    while True:
-        # Query manager for tasks
-        # If Task queue is not full add to queue
-
-        time.sleep(int(config['tasks']['interval']))
+        # Get task from queue if not empty
+        if tasks_queue.empty() == False:
+            logger.debug('Task is not empty, worker is getting a task', extra={'thread_id':str(threading.get_ident())})
+            new_task = tasks_queue.get()
+            # launch as needed type
+            if spawn_subprocess_task(new_task['task']['id'], new_task['bin']['name'], new_task['bin']['input'], new_task['parameters'], new_task['bin']['output']):
+                logger.debug('Task execution completed successfully, marking task as done in queue as manager should have bene updated already.', extra={'task':new_task, 'thread_id':str(threading.get_ident())})
+            else:
+                logger.debug('Task execution did not complete successfully, marking task as done in queue as manager should have bene updated already.', extra={'task':new_task, 'thread_id':str(threading.get_ident())})
+            # Complete task
+            tasks_queue.task_done()
+        else:
+            queue_delay = 1
+            logger.debug('Task is empty, not starting a new task yet.', extra={'thread_id':str(threading.get_ident()), 'sleep':queue_delay})
+            time.sleep(queue_delay)
 
 if __name__ == '__main__':
 
@@ -454,4 +485,6 @@ if __name__ == '__main__':
         worker.start()
 
     # Create and start collector thread:
-        task_collector = threading.Thread(target=task_collector, args=())
+        collector = threading.Thread(target=task_collector, args=())
+        collector.daemon = True
+        collector.start()

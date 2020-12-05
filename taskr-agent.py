@@ -69,9 +69,9 @@ def task_collector():
                 for task in pending_tasks:
 
                     if tasks_queue.full() == False:
-
-                        tasks_queue.put(task)
+                        tasks_queue.put(task['task']['id'])
                         logger.debug('Collector added a task to the task queue', extra={'task':task})
+                        logger.info('A task has been added to the queue', extra={'task_id':task['task']['id']})
 
                         if query.update_task(task['task']['id'], "queued", None):
                             logger.debug('Collector successfully updated task status to queued', extra={'task':task})
@@ -83,7 +83,8 @@ def task_collector():
                 logger.debug('Manager did not respond with any tasks to add to the queue', extra={})
             # If Task queue is not full add to queue
         else:
-            logger.debug('Task queue is full, collector is not querying for tasks')
+            logger.info("Task queue is full", extra={'queue_max_size':config['tasks']['queue_size']})
+            logger.debug('Task queue is full, collector is not querying for tasks', extra={'queue_max_size':config['tasks']['queue_size']})
 
         # Wait for the sepcificed delay in the config file
         time.sleep(int(config['tasks']['interval']))
@@ -96,7 +97,7 @@ def task_worker():
         # Get task from queue if not empty
         if tasks_queue.empty() == False:
 
-            logger.debug('Task is not empty, worker is getting a task', eextra={'thread_name':worker.name})
+            logger.debug('Task is not empty, worker is getting a task', extra={'thread_name':worker.name})
 
             task_id = tasks_queue.get()
 
@@ -105,12 +106,15 @@ def task_worker():
             logger.debug('Created task object', extra={'task_id':task_id, 'thread_name':worker.name})
 
             # Execute Task
+            logger.info("Executing task", extra={'task_id':task_id})
             if task.execute():
                 logger.debug('Task executed successfully', extra={'task_id':task_id, 'thread_name':worker.name})
+                logger.info("Task executed successfully", extra={'task_id':task_id})
                 tasks_queue.task_done()
 
             else:
                 logger.debug('Task execution did not complete successfully, marking task as done in queue as Task object should have bene updated already.', extra={'task_id':task_id, 'thread_name':worker.name})
+                logger.info("Task did not execute successfully", extra={'task_id':task_id})
                 tasks_queue.task_done()
 
         else:

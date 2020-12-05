@@ -99,16 +99,14 @@ class Query:
         # Request tasks from manager via task query endpoint
         self.task_id = task_id
         self.task_details = {}
+
         self.request_host = self.host_base + f"/task/{self.task_id}"
-
         logger.debug('Sending GET query request to the manager', extra={'request_host': self.request_host, 'request_headers': self.request_headers})
-
         request_response = requests.get(self.request_host, headers=self.request_headers)
 
         if request_response.status_code == 200:
 
             logger.debug('Received response from the manager', extra={'body': request_response.text, 'status_code': request_response.status_code})
-
             request_response_json = request_response.json()
 
             # If the request did contain a single task, add it to a list, else return an empty list.
@@ -121,7 +119,7 @@ class Query:
 
             elif len(request_response_json['data']['results']) == 0:
 
-                logger.debug('The manager did not respond with a task for that ID', extra={'tasks': request_response_json['data']['results']})
+                logger.debug('The manager did not respond with a task for that ID', extra={'tasks': request_response_json['data']['results'], 'task_id':self.task_id, 'request_host':self.request_host})
 
                 return {}
 
@@ -193,7 +191,6 @@ class Query:
             False if failed or error
         """
         self.task_id = task_id
-        self.request_host = self.host_base + f"/task/{self.task_id}"
 
         # Make sure have the latest task details stored
         self.get_task(self.task_id)
@@ -206,22 +203,22 @@ class Query:
         if task_output != None:
             self.task_details['response'] = task_output
 
-
+        self.request_host = self.host_base + f"/task"
         logger.debug('Sending PATCH request to the manager', extra={'request_host':  self.request_host, 'request_headers':  self.request_headers, 'json':self.task_details})
 
         request_response = requests.patch(self.request_host, headers=self.request_headers, json=self.task_details)
 
         logger.debug('Received response from the manager', extra={'body': request_response.text, 'status_code': request_response.status_code})
 
-        request_response_json = request_response.json()
-
         if request_response.status_code == 200:
+
+            request_response_json = request_response.json()
 
             logger.debug('Task updated successfully', extra={'request_response_json': request_response_json})
             return True
 
         else:
-            logger.error('The manager did not respond with 200 when updating task', extra={'request_response_json': request_response_json})
+            logger.error('The manager did not respond with 200 when updating task', extra={'request_response_text': request_response.text, 'request_host':self.request_host})
             return False
 
 class Task:
@@ -235,15 +232,20 @@ class Task:
         query = Query(self.manager_address, self.manager_port, None)
         
         task_details = query.get_task(self.task_id)
+
         self.type_id = task_details['task']['type']
+        self.paramaters = task_details['parameters']
 
         type_details = query.get_type(self.type_id)
 
         self.bin_name = type_details['bin']['name']
-        self.bin_shasum = type_details['bin']['shasum']
-        self.input_type = type_details['bin']['type']
+        self.bin_shasum = type_details['shasum']
+        self.input_type = type_details['bin']['input']
         self.output_type = type_details['bin']['output']
-        self.paramaters = type_details['paramaters']
+        if 'exec' in type_details['bin']:
+            self.bin_exec = type_details['bin']['exec']
+        else:
+            self.bin_exec = None
 
         # Set the Task status to accepted once we have everything
         self.status = "accepted"
@@ -308,10 +310,9 @@ class Task:
         #Delete the file if it already exists
         if os.path.isfile(f"types/{self.bin_name}"):
             logger.debug('Task type bin file exists on the system, deleting', extra={'type_bin_name': self.bin_name})
-            os.remove(f"types/{self.bin_name}")
 
         else:
-
+            logger.debug('Task type bin file does not exist on the system, deleting', extra={'type_bin_name': self.bin_name})
             # Request task type bin from manager via task type download endpoint
             self.request_host = self.host_base + f"/type/download/{self.type_id}"
             self.request_headers = {"Accept": "*/*"}
@@ -319,10 +320,10 @@ class Task:
             logger.debug('Sending GET query request to the manager', extra={'request_host': self.request_host, 'request_headers': self.request_headers})
 
             request_response = requests.get(self.request_host, headers=self.request_headers)
-            logger.debug('Received response from the manager', extra={'body': request_response.text, 'status_code': request_response.status_code})
+            logger.debug('Received response from the manager', extra={'body': request_response.text, 'status_code': request_response.status_code, 'headers':request_response.headers})
 
             # We might get a JSON response if something went wrong, so just check here, log and return false
-            if request_response.is_json():
+            if request_response.headers.get('content-type') == 'application/json':
 
                 request_response_json = request_response.json()
                 logger.debug('Received JSON response from manager rather than a file when downloading type bin', extra={'type_id': self.type_id, 'json':request_response_json})
@@ -384,7 +385,15 @@ class Task:
 
         query = Query(self.manager_address, self.manager_port, None)
 
-        process_args = [f'types/{self.bin_name}']
+        if (self.bin_exec != None) and (self.bin_exec != ""):
+            process_args = [f'{self.bin_exec} ']
+        else:
+            process_args = []
+
+        process_args.append(os.path.join(os.path.abspath('types'), self.bin_name))
+
+        self.download_bin()
+
 
         # Process input paramaters
         if self.input_type == "cli":
@@ -415,7 +424,7 @@ class Task:
 
                 # Run basic subprocess
                 query.update_task(self.task_id, "running", None)
-                self.subprocess = subprocess.run(process_args, capture_output=True)
+                self.subprocess = subprocess.run(process_args, capture_output=True, text=True)
 
             else:
                 logger.debug('The provided task paramaters is not a dictionary', extra={'task_id':self.task_id,'paramaters':self.paramaters})
@@ -431,23 +440,23 @@ class Task:
 
         if self.subprocess.returncode == 0:
             self.process_output['meta']['successful'] = True
-            self.process_output['meta']['retun_code'] = self.subprocess.returncode
+            self.process_output['meta']['retun_code'] = int(self.subprocess.returncode)
             self.status = "completed"
         else:
             self.process_output['meta']['successful'] = False
-            self.process_output['meta']['retun_code'] = self.subprocess.returncode
+            self.process_output['meta']['retun_code'] = int(self.subprocess.returncode)
             self.status = "failed"
 
-        self.process_output['stderr'] = self.subprocess.stderr
-        self.process_output['stdout'] = self.subprocess.stdout
+        self.process_output['stderr'] = str(self.subprocess.stderr)
+        self.process_output['stdout'] = str(self.subprocess.stdout)
 
         if self.output_type == "stdout":
-            self.process_output['output'] = self.subprocess.stdout
+            self.process_output['output'] = str(self.subprocess.stdout)
         else:
             logger.error('Invalid output type when compiling resuts', extra={'task_id':self.task_id,'output_type':self.output_type})
 
         # Update the task's status on the manager with the process_output
-        if query.update_task(self.task_id, self.status, self.process_output):
+        if query.update_task(self.task_id, self.status, json.dumps(self.process_output)):
             logger.debug('Task execution process completed successfully', extra={'task_id':self.task_id})
             return True
         else:
